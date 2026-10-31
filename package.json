@@ -1,0 +1,39 @@
+{
+  "name": "learn-jest",
+  "version": "1.0.0",
+  "description": "Runnable companion project for the Learn Jest masterclass: matchers, mocks, async tests, fake timers and coverage in TypeScript.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage",
+    "test:ci": "jest --ci --coverage --maxWorkers=50%"
+  },
+  "keywords": [
+    "jest",
+    "testing",
+    "typescript",
+    "mocks",
+    "fake-timers"
+  ],
+  "author": "The Learning Hub",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@jest/globals": "^30.5.2",
+    "@swc/core": "^1.16.21",
+    "@swc/jest": "^0.2.39",
+    "@types/node": "^26.6.6",
+    "jest": "^30.5.2",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  }
+}
