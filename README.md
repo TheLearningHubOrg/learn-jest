@@ -175,7 +175,7 @@ npm install --save-dev ts-jest
 npx jest
 ```
 
-A minimal configuration for a TypeScript project that ships as native ESM (`"type": "module"`) but lets SWC compile tests to CommonJS, which keeps `jest.mock` hoisting fully supported:
+A minimal configuration for a TypeScript project that ships as native ESM (`"type": "module"`) but lets SWC compile tests to CommonJS, so `jest.mock` calls can be hoisted above the generated `require` calls (with one SWC-specific caveat covered in [3.4](#34-module-mocking-with-jestmock)):
 
 ```javascript
 // jest.config.js
@@ -559,7 +559,7 @@ it('programs behaviour per call', async () => {
   await expect(fetchRate('INR')).resolves.toBe(83.4);
 
   // mockImplementation gives full control when canned values are not enough
-  const byCurrency = jest.fn((c: string) => (c === 'EUR' ? 0.92 : 1));
+  const byCurrency = jest.fn((c: string): number => (c === 'EUR' ? 0.92 : 1));
   byCurrency.mockImplementationOnce(() => 0);
   expect([byCurrency('EUR'), byCurrency('EUR')]).toEqual([0, 0.92]);
 });
@@ -625,9 +625,21 @@ export async function checkout(orderId: string, cents: number, email: string) {
 }
 ```
 
+With `@swc/jest` there is one trap. SWC hoists only calls made on the **global** `jest` object. If the file does `import { jest } from '@jest/globals'`, the calls become `_globals.jest.mock(...)`, stay below the `require` calls, and the real modules load first (you will see errors such as `mockResolvedValue is not a function`). `babel-jest` and `ts-jest` recognise the `@jest/globals` import; SWC does not. So in files that mock modules, leave `jest` out of the import and type the global once:
+
+```typescript
+// tests/jest-global.d.ts
+import type { jest as JestObject } from '@jest/globals';
+
+declare global {
+  const jest: typeof JestObject;
+}
+```
+
 ```typescript
 // tests/checkout.test.ts
-import { beforeEach, expect, it, jest } from '@jest/globals';
+// `jest` is deliberately NOT imported here, so SWC sees the global and hoists jest.mock
+import { beforeEach, expect, it } from '@jest/globals';
 import { checkout } from '../src/checkout.js';
 import { chargeCard } from '../src/payments.js';
 import { sendReceipt } from '../src/mailer.js';
@@ -661,7 +673,7 @@ it('does not email when the charge fails', async () => {
 });
 ```
 
-How it works: the Babel or SWC Jest plugin **hoists** `jest.mock` calls above the `import` statements, so the registry is primed before `checkout.ts` loads its dependencies. Because the factory runs before the file's own variables exist, it may only reference imports from `@jest/globals`, globals, and variables whose names start with `mock`.
+How it works: the Babel or SWC Jest plugin **hoists** `jest.mock` calls above the `import` statements (which are `require` calls by then), so the registry is primed before `checkout.ts` loads its dependencies. Because the factory runs before the file's own variables exist, it may only reference `jest`, other globals, and variables whose names start with `mock`.
 
 Partial mocks keep most of a module real:
 
@@ -713,7 +725,7 @@ it('spies on getters and setters', () => {
 });
 ```
 
-A spy can only replace a property that is writable or configurable. ESM namespace objects are frozen and SWC/TypeScript CommonJS output often defines exports as getters, so `jest.spyOn(moduleNamespace, 'fn')` frequently throws. Use dependency injection or `jest.mock` for module exports.
+A spy can only replace a property that is writable or configurable. ESM namespace bindings are read-only, and SWC's CommonJS output defines each export as a non-configurable getter, so `jest.spyOn(moduleNamespace, 'fn')` frequently throws. Use dependency injection or `jest.mock` for module exports.
 
 ### 3.6 Clear vs Reset vs Restore
 
@@ -721,7 +733,10 @@ A spy can only replace a property that is writable or configurable. ESM namespac
 | :--- | :---: | :---: | :---: |
 | `mockFn.mockClear()` / `clearMocks: true` | ✅ | ❌ | ❌ |
 | `mockFn.mockReset()` / `resetMocks: true` | ✅ | ✅ | ❌ |
-| `mockFn.mockRestore()` / `restoreMocks: true` | ✅ | ✅ | ✅ (spies only) |
+| `mockFn.mockRestore()` (one mock) | ✅ | ✅ | ✅ (spies only) |
+| `jest.restoreAllMocks()` / `restoreMocks: true` | ❌ | ❌ | ✅ (spies only) |
+
+Since Jest 30, `restoreAllMocks` and the `restoreMocks` option only put spied methods back. They no longer clear or reset plain `jest.fn()` mocks, which is why `restoreMocks` is paired with `clearMocks` rather than used on its own.
 
 Recommended defaults in `jest.config.js`: `clearMocks: true` so call counts never leak between tests, and `restoreMocks: true` so spies on globals such as `console` or `Date` never outlive their test. Turn on `resetMocks` only if every test programs its own mock behaviour, because it wipes implementations set in factories and `beforeAll` hooks.
 
@@ -1095,7 +1110,7 @@ it('custom serializer redacts secrets everywhere in a snapshot', () => {
   });
   expect({ apiKey: 'sk_test_123', region: 'eu' }).toMatchInlineSnapshot(`
 {
-  "apiKey": [REDACTED],
+  "apiKey": "[REDACTED]",
   "region": "eu",
 }
 `);
@@ -1337,8 +1352,8 @@ jobs:
       matrix:
         shard: [1, 2, 3, 4]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 24
           cache: npm
@@ -1428,7 +1443,7 @@ npm run dev            # prints a sample pro-plan total
 > **Answer**: `toEqual` compares structure recursively but ignores properties whose value is `undefined`, treats sparse array holes as `undefined`, and does not compare prototypes, so a `Money` instance equals a plain `{ amount: 5 }`. `toStrictEqual` checks all of those. The failure mode of defaulting to `toEqual` is an API that suddenly returns `{ email: undefined }` or a plain object instead of a class, with tests still green. Default to `toStrictEqual` for domain objects and response payloads, and reach for `toEqual` deliberately when class identity is irrelevant.
 
 #### Q2: Why does `jest.mock` work even though it appears below the `import` statements?
-> **Answer**: The Jest transform plugin (`babel-plugin-jest-hoist`, or the equivalent in `@swc/jest`) moves `jest.mock` calls to the top of the compiled CommonJS module, above the `require` calls that imports become. The module registry is therefore primed before the code under test loads its dependencies. The side effect is the factory restriction: it runs before the file's own variables are initialised, so it may only reference `jest`, globals, and variables prefixed with `mock`. Under native ESM the imports are linked before any code executes, which is why `jest.unstable_mockModule` plus dynamic `import()` is required there.
+> **Answer**: The Jest transform plugin (`babel-plugin-jest-hoist`, or the equivalent in `@swc/jest`) moves `jest.mock` calls to the top of the compiled CommonJS module, above the `require` calls that imports become. The module registry is therefore primed before the code under test loads its dependencies. One transformer difference matters in practice: the Babel plugin and `ts-jest` also hoist a `jest` imported from `@jest/globals`, while SWC hoists only the global `jest`, so SWC users leave `jest` out of that import in files that mock modules. The side effect is the factory restriction: it runs before the file's own variables are initialised, so it may only reference `jest`, globals, and variables prefixed with `mock`. Under native ESM the imports are linked before any code executes, which is why `jest.unstable_mockModule` plus dynamic `import()` is required there.
 
 #### Q3: A test that mocks a module passes alone but fails when run with the whole file. Why?
 > **Answer**: Tests in a single file share the module registry and every `jest.fn()` instance. A previous test programmed `mockResolvedValue` or left call history behind, and this test inherits it. Fix it structurally: enable `clearMocks: true` (call history) and `restoreMocks: true` (spies) in config, program behaviour inside each test or a `beforeEach`, and never rely on `mockReturnValueOnce` queues set up by another test. Running with `--randomize` exposes the remaining coupling.
@@ -1437,7 +1452,7 @@ npm run dev            # prints a sample pro-plan total
 > **Answer**: Injection is the default for code you own: constructors or function parameters receive collaborators, tests pass `jest.fn()` doubles, there are no hoisting rules, types are fully checked, and it behaves the same under CommonJS and ESM. Module mocking is for code you cannot reshape cheaply: third-party SDKs imported deep in a call chain, legacy modules, or framework internals. A codebase where most tests need `jest.mock` is signalling tight coupling, and that is a design conversation, not a testing one.
 
 #### Q5: Explain `mockClear`, `mockReset` and `mockRestore`.
-> **Answer**: `mockClear` wipes `mock.calls`, `mock.results` and `mock.instances` but keeps the programmed implementation. `mockReset` does that and also removes implementations and queued `Once` values, so the mock returns `undefined`. `mockRestore` applies to spies created with `jest.spyOn` and puts the original method back on the object. Config flags `clearMocks`, `resetMocks` and `restoreMocks` apply them before every test. A common outage of the test suite: enabling `resetMocks` globally silently erases implementations defined in `jest.mock` factories, turning hundreds of tests red at once.
+> **Answer**: `mockClear` wipes `mock.calls`, `mock.results` and `mock.instances` but keeps the programmed implementation. `mockReset` does that and also removes implementations and queued `Once` values, so the mock returns `undefined`. `mockRestore` applies to spies created with `jest.spyOn` and puts the original method back on the object. Config flags `clearMocks`, `resetMocks` and `restoreMocks` apply the matching `*AllMocks` call before every test; since Jest 30, `restoreMocks` only restores spies and leaves plain `jest.fn()` state alone, so pair it with `clearMocks`. A common outage of the test suite: enabling `resetMocks` globally silently erases implementations defined in `jest.mock` factories, turning hundreds of tests red at once.
 
 #### Q6: How do fake timers interact with `async`/`await`, and why does a retry test hang?
 > **Answer**: The synchronous APIs such as `advanceTimersByTime` fire due timer callbacks but do not drain the microtask queue between them. In a retry loop, the timer resolves the `sleep` promise, but the continuation after `await sleep()` is a microtask that never gets a chance to run, so the next attempt never schedules its timer and the test waits forever on the outer promise. The `Async` variants (`advanceTimersByTimeAsync`, `runAllTimersAsync`) await microtasks between timers and resolve this. Also attach `rejects` handlers before advancing time to avoid unhandled rejections.
